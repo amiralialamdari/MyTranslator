@@ -10,8 +10,10 @@
 import logging
 import os
 
+import httpx
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -21,12 +23,15 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-lite-latest")
+# برای ترجمه "فکر کردن" لازم نیست و فقط کندش می‌کند؛ خالی بگذارید تا پیش‌فرض مدل استفاده شود
+GEMINI_THINKING = os.getenv("GEMINI_THINKING", "minimal").strip()
 # اگر خالی نباشد، فقط این کاربر (آیدی عددی تلگرام) می‌تواند از ربات استفاده کند
 ALLOWED_USER_ID = os.getenv("ALLOWED_USER_ID", "").strip()
 
@@ -39,7 +44,16 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = genai.Client(
+    api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=60_000)
+)
+GEN_CONFIG = (
+    types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(thinking_level=GEMINI_THINKING)
+    )
+    if GEMINI_THINKING
+    else None
+)
 
 AUTO = "auto"
 TELEGRAM_MAX_LEN = 4096
@@ -64,7 +78,7 @@ def build_prompt(text: str, target: str) -> str:
 
 def translate(text: str, target: str) -> str:
     response = client.models.generate_content(
-        model=GEMINI_MODEL, contents=build_prompt(text, target)
+        model=GEMINI_MODEL, contents=build_prompt(text, target), config=GEN_CONFIG
     )
     return (response.text or "").strip()
 
@@ -133,8 +147,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(result[i : i + TELEGRAM_MAX_LEN])
 
 
+def ipv4_request() -> HTTPXRequest:
+    # بعضی سرورها IPv6 خراب دارند و اتصال به تلگرام قطع می‌شود؛ فقط IPv4 استفاده می‌کنیم
+    transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+    return HTTPXRequest(httpx_kwargs={"transport": transport})
+
+
 def main() -> None:
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .request(ipv4_request())
+        .get_updates_request(ipv4_request())
+        .build()
+    )
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(CommandHandler("to", set_target))
     app.add_handler(CommandHandler("auto", set_auto))
